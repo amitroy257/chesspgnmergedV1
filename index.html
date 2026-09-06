@@ -151,6 +151,13 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
           <label for="optGroup">Split into chapters by the White tag</label>
         </div>
         <div class="opt">
+          <input type="checkbox" id="optShortName" checked>
+          <label for="optShortName">Shorten each merged game's name to its first word</label>
+        </div>
+        <div class="opt" style="padding-left:24px">
+          <small>&ldquo;Dutch 6...f5 #1&rdquo; &rarr; &ldquo;Dutch&rdquo;. Numbered chapters like &ldquo;5) Dutch Defense&rdquo; keep their full name.</small>
+        </div>
+        <div class="opt">
           <input type="checkbox" id="optLabel" checked>
           <label for="optLabel">Tag each merged line's last comment with its game name</label>
         </div>
@@ -326,6 +333,16 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     return w || b || '';
   }
 
+  // "Dutch 6...f5 #1" -> "Dutch", "Quickstarter Guide" -> "Quickstarter".
+  // A numbered Chessable chapter ("5) Dutch Defense", "1.1) ... - Model
+  // Games") is already a clean title, so keep it whole.
+  function shortenChapter(name) {
+    name = String(name == null ? '' : name).trim();
+    if (/^\d+(\.\d+)*\)/.test(name)) return name;
+    var first = (name.split(/\s+/)[0] || name).replace(/[-:;,.–—]+$/, '');
+    return first || name;
+  }
+
   function insertNode(target, source, ctx) {
     for (var i = 0; i < source.children.length; i++) {
       var sc = source.children[i];
@@ -435,6 +452,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     includePlyCount: true,
     wrap: 0,
     keepExtraTags: false,
+    shortenChapterName: true,
     result: '*'
   };
 
@@ -452,6 +470,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       var v = base[key];
       if (v === undefined) v = key === 'Date' ? '????.??.??' : '?';
       if (key === 'Result') v = opt.result;
+      if (key === 'White' && opt.shortenChapterName !== false) v = shortenChapter(v);
       tags.push('[' + key + ' "' + v + '"]');
     }
     if (opt.annotator) tags.push('[Annotator "' + opt.annotator + '"]');
@@ -509,6 +528,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   'use strict';
   var M = PgnMerge;
   var games = [];
+  var srcName = '';    // stem of the last loaded file, for the download name
   var modes = {};      // chapter name -> 'auto' | 'merge' | 'keep'
   var openState = {};  // chapter name -> bool
   var lastPgn = '';
@@ -522,7 +542,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     list:$('list'), warns:$('warns'), out:$('out'), book:$('book'), treePick:$('treePick'),
     copy:$('copy'), dl:$('dl'), cChapters:$('cChapters'), inStats:$('inStats'), outStats:$('outStats'),
     group:$('optGroup'), label:$('optLabel'), limit:$('optLimit'), ply:$('optPly'),
-    space:$('optSpace'), wrap:$('optWrap'), ann:$('optAnn')
+    space:$('optSpace'), wrap:$('optWrap'), ann:$('optAnn'), shortName:$('optShortName')
   };
 
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
@@ -532,6 +552,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       blackTagLimit: parseInt(el.limit.value,10) || 0,
       includePlyCount: el.ply.checked,
       wrap: el.wrap.checked ? 80 : 0,
+      shortenChapterName: el.shortName.checked,
       annotator: el.ann.value.trim()
     };
   }
@@ -590,6 +611,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   }
   function flash(m){ flashMsg=m; render(); setTimeout(function(){ flashMsg=''; render(); }, 4000); }
   function readFiles(files){
+    if(files && files.length) srcName = String(files[0].name).replace(/\.[^.]+$/,'');
     Array.prototype.forEach.call(files, function(f){
       var r = new FileReader();
       r.onload = function(){ addText(String(r.result), false); };
@@ -611,11 +633,11 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
 
   var t;
   el.inp.addEventListener('input', function(){ clearTimeout(t); t=setTimeout(reparsePaste, 300); });
-  el.clear.addEventListener('click', function(){ games=[]; modes={}; openState={}; el.inp.value=''; render(); });
+  el.clear.addEventListener('click', function(){ games=[]; srcName=''; modes={}; openState={}; el.inp.value=''; render(); });
   el.expand.addEventListener('click', function(){ chapters().forEach(function(c){ openState[c.name]=true; }); render(); });
   el.collapse.addEventListener('click', function(){ chapters().forEach(function(c){ openState[c.name]=false; }); render(); });
   el.space.addEventListener('change', reparsePaste);
-  [el.group, el.label, el.ply, el.wrap].forEach(function(c){ c.addEventListener('change', render); });
+  [el.group, el.label, el.ply, el.wrap, el.shortName].forEach(function(c){ c.addEventListener('change', render); });
   el.limit.addEventListener('input', render);
   el.ann.addEventListener('input', render);
   el.treePick.addEventListener('change', function(){ treeSel = el.treePick.value; render(); });
@@ -630,12 +652,13 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   el.dl.addEventListener('click', function(){
     if(!lastPgn) return;
     var cs = chapters();
-    var base = cs.length ? cs[0].name : 'merged';
-    var fn = base.replace(/[^\w\- ]+/g,'').trim().replace(/\s+/g,'-').toLowerCase() || 'merged';
+    var stem = (srcName || (cs.length ? cs[0].name : '') || 'merged')
+      .replace(/[\/\\:*?"<>|]+/g,'').replace(/\s+/g,' ').trim();
+    var fn = (stem || 'merged') + ' merged and sorted.pgn';
     var blob = new Blob([lastPgn], {type:'application/x-chess-pgn'});
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = fn + '-merged.pgn';
+    a.download = fn;
     document.body.appendChild(a); a.click(); document.body.removeChild(a);
     setTimeout(function(){ URL.revokeObjectURL(a.href); }, 1000);
   });
