@@ -148,7 +148,15 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       <fieldset>
         <div class="opt">
           <input type="checkbox" id="optGroup" checked>
-          <label for="optGroup">Split into chapters by the White tag</label>
+          <label for="optGroup">Split into chapters, reading the chapter from the</label>
+          <select id="optChapterTag">
+            <option value="auto">auto tag</option>
+            <option value="White">White tag</option>
+            <option value="Black">Black tag</option>
+          </select>
+        </div>
+        <div class="opt" style="padding-left:24px">
+          <small id="chapterTagNote"></small>
         </div>
         <div class="opt">
           <input type="checkbox" id="optShortName" checked>
@@ -334,13 +342,35 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   }
 
   // "Dutch 6...f5 #1" -> "Dutch", "Quickstarter Guide" -> "Quickstarter".
-  // A numbered Chessable chapter ("5) Dutch Defense", "1.1) ... - Model
-  // Games") is already a clean title, so keep it whole.
+  // Deliberate chapter titles are already clean, so keep them whole:
+  // numbered ("5) Dutch Defense", "1.1) ...", "3. Something") and ones that
+  // open with a structural word ("Chapter 2) ...", "Model Games").
   function shortenChapter(name) {
     name = String(name == null ? '' : name).trim();
-    if (/^\d+(\.\d+)*\)/.test(name)) return name;
+    if (/^\d+([.)]\d+)*[).:]/.test(name)) return name;
+    if (/^(chapter|unit|part|section|lesson|model|game|round|introduction)\b/i.test(name)) return name;
     var first = (name.split(/\s+/)[0] || name).replace(/[-:;,.–—]+$/, '');
     return first || name;
+  }
+
+  function distinctTagCount(games, tag) {
+    var seen = Object.create(null), n = 0;
+    for (var i = 0; i < games.length; i++) {
+      var v = (games[i].tags[tag] || '').trim();
+      if (v && !seen[v]) { seen[v] = 1; n++; }
+    }
+    return n;
+  }
+
+  // Chessable exports two layouts: usually [White] holds the chapter and
+  // [Black] the individual line, but some courses reverse it. Whichever tag
+  // repeats across many games is the chapter. Returns 'White' or 'Black'.
+  function chapterOrientation(games) {
+    if (games.length < 2) return 'White';
+    var w = distinctTagCount(games, 'White');
+    var b = distinctTagCount(games, 'Black');
+    if (b && b < w && games.length / b >= 2) return 'Black';
+    return 'White';
   }
 
   function insertNode(target, source, ctx) {
@@ -463,11 +493,15 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
 
     var merged = mergeGames(games, opt);
     var base = games.length ? games[0].tags : {};
+    // chapter tag -> output [White]; the other -> output [Black] (the mainline
+    // line name). Lets reversed-layout Chessable exports merge correctly.
+    var chapKey = opt.chapterFrom === 'Black' ? 'Black' : 'White';
+    var lineKey = chapKey === 'Black' ? 'White' : 'Black';
     var order = ['Event', 'Site', 'Date', 'Round', 'White', 'Black', 'Result'];
     var tags = [];
     for (var i = 0; i < order.length; i++) {
       var key = order[i];
-      var v = base[key];
+      var v = key === 'White' ? base[chapKey] : key === 'Black' ? base[lineKey] : base[key];
       if (v === undefined) v = key === 'Date' ? '????.??.??' : '?';
       if (key === 'Result') v = opt.result;
       if (key === 'White' && opt.shortenChapterName !== false) v = shortenChapter(v);
@@ -518,7 +552,9 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     build: build,
     mergeGames: mergeGames,
     writeMovetext: writeMovetext,
-    countNodes: countNodes
+    countNodes: countNodes,
+    chapterOrientation: chapterOrientation,
+    shortenChapter: shortenChapter
   };
 });
 
@@ -529,6 +565,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   var M = PgnMerge;
   var games = [];
   var srcName = '';    // stem of the last loaded file, for the download name
+  var chapterFrom = 'White';  // which tag holds the chapter, resolved each render
   var modes = {};      // chapter name -> 'auto' | 'merge' | 'keep'
   var openState = {};  // chapter name -> bool
   var lastPgn = '';
@@ -542,7 +579,8 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     list:$('list'), warns:$('warns'), out:$('out'), book:$('book'), treePick:$('treePick'),
     copy:$('copy'), dl:$('dl'), cChapters:$('cChapters'), inStats:$('inStats'), outStats:$('outStats'),
     group:$('optGroup'), label:$('optLabel'), limit:$('optLimit'), ply:$('optPly'),
-    space:$('optSpace'), wrap:$('optWrap'), ann:$('optAnn'), shortName:$('optShortName')
+    space:$('optSpace'), wrap:$('optWrap'), ann:$('optAnn'), shortName:$('optShortName'),
+    chapterTag:$('optChapterTag'), chapterTagNote:$('chapterTagNote')
   };
 
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
@@ -553,20 +591,26 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       includePlyCount: el.ply.checked,
       wrap: el.wrap.checked ? 80 : 0,
       shortenChapterName: el.shortName.checked,
+      chapterFrom: chapterFrom,
       annotator: el.ann.value.trim()
     };
   }
   function plies(root){ var n=root,c=0; while(n.children.length){n=n.children[0];c++;} return c; }
   function firstMoves(root,k){ var o=[],n=root; while(n.children.length&&o.length<k){n=n.children[0];o.push(n.san);} return o.join(' '); }
   function lineName(g){
-    var b=(g.tags.Black||'').trim();
-    return b || (g.tags.Event||'').trim() || 'untitled line';
+    var other = chapterFrom === 'Black' ? 'White' : 'Black';
+    return (g.tags[other]||'').trim() || (g.tags.Event||'').trim() || 'untitled line';
   }
 
   // ---- chapters -------------------------------------------------------
+  function resolveChapterFrom(){
+    var pick = el.chapterTag ? el.chapterTag.value : 'auto';
+    chapterFrom = pick === 'auto' ? M.chapterOrientation(games) : pick;
+    return chapterFrom;
+  }
   function chapterKey(g){
     if(!el.group.checked) return 'All lines';
-    return (g.tags.White||'').trim() || '(no White tag)';
+    return (g.tags[chapterFrom]||'').trim() || '(no '+chapterFrom+' tag)';
   }
   function autoMerge(list){
     var on = list.filter(function(g){ return g.on; });
@@ -583,6 +627,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     return ok;
   }
   function chapters(){
+    resolveChapterFrom();
     var order=[], map={};
     games.forEach(function(g){
       var k = chapterKey(g);
@@ -637,7 +682,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   el.expand.addEventListener('click', function(){ chapters().forEach(function(c){ openState[c.name]=true; }); render(); });
   el.collapse.addEventListener('click', function(){ chapters().forEach(function(c){ openState[c.name]=false; }); render(); });
   el.space.addEventListener('change', reparsePaste);
-  [el.group, el.label, el.ply, el.wrap, el.shortName].forEach(function(c){ c.addEventListener('change', render); });
+  [el.group, el.label, el.ply, el.wrap, el.shortName, el.chapterTag].forEach(function(c){ c.addEventListener('change', render); });
   el.limit.addEventListener('input', render);
   el.ann.addEventListener('input', render);
   el.treePick.addEventListener('change', function(){ treeSel = el.treePick.value; render(); });
@@ -775,6 +820,13 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     var cs = chapters();
     renderList(cs);
     el.cChapters.textContent = cs.length;
+
+    if(el.chapterTagNote){
+      var auto = el.chapterTag && el.chapterTag.value === 'auto';
+      el.chapterTagNote.textContent = games.length
+        ? (auto ? 'auto: grouping by the '+chapterFrom+' tag' : 'grouping by the '+chapterFrom+' tag')
+        : '';
+    }
 
     var merged = cs.filter(function(c){ return c.merge; });
     var kept = cs.length - merged.length;
