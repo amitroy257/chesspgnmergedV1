@@ -319,6 +319,17 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
           // It's not a second move - strict PGN readers choke on it (illegal
           // move for the side to play) and desync every move number after
           // it. Fold the restated notation into the comment text instead.
+          //
+          // NB: a broader check ("this move's own claimed move-number
+          // contradicts whose turn it actually is") would also catch a
+          // second, different move mentioned the same way without proper
+          // variation parens (e.g. "10.Nc3 {,or} 10.Rd1 {.}") - but at least
+          // one course in the wild numbers its mainline "1. c4 1. e5 2. g3
+          // 2. Nf6" (bare "N." for *both* colors, never "N..."), which is
+          // indistinguishable from that bug by move-number alone. Tried it,
+          // it silently mis-folded thousands of genuine replies across that
+          // file before this shipped. Narrower but safe beats broader but
+          // occasionally catastrophic.
           node.comments.push(full);
           continue;
         }
