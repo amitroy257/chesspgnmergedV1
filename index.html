@@ -287,6 +287,8 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     var root = newNode(null, null);
     var node = root;
     var stack = [];
+    var pendingNum = null;   // normalized text of the last move-number token
+                              // seen, consumed by the very next move token
     var result = null;
 
     var tokenRe =
@@ -301,39 +303,50 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       } else if (t[3]) {
         stack.push(node);
         node = node.parent || root;
+        pendingNum = null;
       } else if (t[4]) {
         node = stack.pop() || root;
+        pendingNum = null;
       } else if (t[5]) {
         node.nags.push(t[5]);
       } else if (t[6]) {
         result = t[6];
+        pendingNum = null;
       } else if (t[7]) {
+        pendingNum = t[7].replace(/\s+/g, '');
         continue;
       } else if (t[8]) {
         var full = t[8];
         var san = full.replace(/[?!]+$/, '');
-        if (!/^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?$|^O-O(-O)?[+#]?$|^0-0(-0)?[+#]?$/.test(san)) continue;
-        if (node !== root && san === node.key) {
-          // Chessable sometimes re-states the move it's annotating, splitting
-          // one comment in two around it, e.g. "7.Qc2 {is a...} 7.Qc2 {...}".
-          // It's not a second move - strict PGN readers choke on it (illegal
-          // move for the side to play) and desync every move number after
-          // it. Fold the restated notation into the comment text instead.
-          //
-          // NB: a broader check ("this move's own claimed move-number
-          // contradicts whose turn it actually is") would also catch a
-          // second, different move mentioned the same way without proper
-          // variation parens (e.g. "10.Nc3 {,or} 10.Rd1 {.}") - but at least
-          // one course in the wild numbers its mainline "1. c4 1. e5 2. g3
-          // 2. Nf6" (bare "N." for *both* colors, never "N..."), which is
-          // indistinguishable from that bug by move-number alone. Tried it,
-          // it silently mis-folded thousands of genuine replies across that
-          // file before this shipped. Narrower but safe beats broader but
-          // occasionally catastrophic.
+        if (!/^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?$|^O-O(-O)?[+#]?$|^0-0(-0)?[+#]?$/.test(san)) { pendingNum = null; continue; }
+        var myNum = pendingNum;
+        pendingNum = null;
+        // Chessable sometimes mentions a move inline instead of playing it,
+        // splitting a comment around it: restating the move it's annotating
+        // ("7.Qc2 {is a...} 7.Qc2 {...}"), or listing a second candidate
+        // without wrapping it in its own variation ("10.Nc3 {,or} 10.Rd1
+        // {.}"). Both share a tell: the new token's own explicit move-number
+        // repeats the one already on the node we're sitting on, which no two
+        // genuinely sequential real moves ever do. Fold it into the comment
+        // text instead of adding a phantom node - strict PGN readers choke
+        // on a second move for a side that hasn't moved and desync every
+        // move number after it.
+        //
+        // Restricted to inside a variation (stack.length, i.e. we're past at
+        // least one "("): at least one course in the wild numbers its bare
+        // *mainline* "1. c4 1. e5 2. g3 2. Nf6" - "N." for both colors, never
+        // "N..." - which looks identical to the bug by move-number alone.
+        // That convention was only ever seen at the top level; inside every
+        // variation in every file checked, a real reply is always numbered
+        // "N..." when numbered at all. Applying the check there caused
+        // thousands of false positives before this restriction was added.
+        var sameNumAsCurrent = stack.length > 0 && node !== root && myNum !== null && myNum === node.declaredNum;
+        if (sameNumAsCurrent || (node !== root && san === node.key)) {
           node.comments.push(full);
           continue;
         }
         var child = newNode(full, node, san);
+        child.declaredNum = myNum;
         node.children.push(child);
         node = child;
       }
