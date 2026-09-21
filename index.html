@@ -220,7 +220,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
 </section>
 
 <footer>
-  Everything runs in this page and nothing is uploaded. A chapter is merged only when its lines all start from the same position with the same first move and none of them has a finished result, which is why model games and tactics get copied through instead. Override any chapter with its own dropdown. Merging matches moves by notation, so lines reaching the same position by a different move order stay on separate branches.
+  Everything runs in this page and nothing is uploaded. A chapter merges by name alone: every line with moves and no finished result joins one game, even if some open with a different first move - they just become their own variation before move one. A line with no moves, a genuine custom position, or a finished result (model games, tactics) is copied through instead, no matter what else is in the chapter. Override any chapter with its own dropdown. Merging matches moves by notation, so lines reaching the same position by a different move order stay on separate branches.
 </footer>
 
 </div>
@@ -659,26 +659,32 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   }
   // A chapter often mixes real repertoire lines with a line that can't join
   // them - a text-only "Conclusion"/"Introduction" summary with no moves, a
-  // puzzle from a genuine custom position, a finished model game. Splitting
-  // by first move also matters: "Quickstarter Guide" or "Offbeat first
-  // moves" chapters legitimately cover several different openings at once.
-  // One disqualifying line used to fail the *entire* chapter back to
-  // copy-through; this groups the chapter's lines into whichever clusters
-  // actually share a position, merges each cluster with 2+ lines, and
-  // copies through anything left on its own (a lone line, or one that never
-  // qualified) - all still listed under the same chapter.
+  // puzzle from a genuine custom position, a finished model game. Those get
+  // excluded and copied through on their own; every other line in the
+  // chapter merges into one game, by chapter name alone - a "Quickstarter
+  // Guide" or "Offbeat first moves" chapter legitimately covers several
+  // different openings at once, and each just becomes its own top-level
+  // variation ("before move one") in the merged game rather than splitting
+  // the chapter into several separate outputs.
+  //
+  // Order still sets the mainline (the footer note above the list) whenever
+  // every eligible line actually starts the same way - drag with up/down/
+  // top as usual. Only when they genuinely open with different first moves,
+  // where there's no natural "next" line to prefer, does the longest one
+  // default to the mainline instead of whichever happened to sit first in
+  // the source file.
   function partitionAuto(list){
-    var eligible=[], groups=[], byFirst={};
+    var eligible=[], groups=[];
     list.forEach(function(g){
       if(g.hasMoves && (!g.tags.FEN || M.isStandardStart(g.tags.FEN)) && (!g.result || g.result === '*')) eligible.push(g);
       else groups.push({games:[g], merge:false});
     });
-    eligible.forEach(function(g){
-      var f = g.root.children[0].san;
-      if(!byFirst[f]){ byFirst[f] = {games:[], first:f}; groups.push(byFirst[f]); }
-      byFirst[f].games.push(g);
-    });
-    groups.forEach(function(grp){ if(grp.merge === undefined) grp.merge = grp.games.length >= 2; });
+    if(eligible.length){
+      var first = eligible[0].root.children[0].san;
+      var sameFirst = eligible.every(function(g){ return g.root.children[0].san === first; });
+      var ordered = sameFirst ? eligible : eligible.slice().sort(function(a,b){ return plies(b.root)-plies(a.root); });
+      groups.push({games: ordered, merge: ordered.length >= 2});
+    }
     return groups;
   }
   function chapters(){
