@@ -313,6 +313,15 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
         var full = t[8];
         var san = full.replace(/[?!]+$/, '');
         if (!/^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?$|^O-O(-O)?[+#]?$|^0-0(-0)?[+#]?$/.test(san)) continue;
+        if (node !== root && san === node.key) {
+          // Chessable sometimes re-states the move it's annotating, splitting
+          // one comment in two around it, e.g. "7.Qc2 {is a...} 7.Qc2 {...}".
+          // It's not a second move - strict PGN readers choke on it (illegal
+          // move for the side to play) and desync every move number after
+          // it. Fold the restated notation into the comment text instead.
+          node.comments.push(full);
+          continue;
+        }
         var child = newNode(full, node, san);
         node.children.push(child);
         node = child;
