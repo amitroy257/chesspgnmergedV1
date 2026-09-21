@@ -353,6 +353,17 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     return first || name;
   }
 
+  // Some Chessable exports stamp every game with [FEN "<standard start>"]
+  // even though it isn't a custom position at all - just the ordinary board.
+  // Only a FEN that actually differs from the initial position should count
+  // as "this game starts somewhere unusual" (blocks merging, needs a SetUp
+  // tag). Compares board+turn+castling+en-passant, ignores the move counters.
+  var STANDARD_FEN_PREFIX = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq -';
+  function isStandardStart(fen) {
+    if (!fen) return true;
+    return String(fen).trim().replace(/\s+/g, ' ').indexOf(STANDARD_FEN_PREFIX) === 0;
+  }
+
   function distinctTagCount(games, tag) {
     var seen = Object.create(null), n = 0;
     for (var i = 0; i < games.length; i++) {
@@ -509,7 +520,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     }
     if (opt.annotator) tags.push('[Annotator "' + opt.annotator + '"]');
     if (base.ECO) tags.push('[ECO "' + base.ECO + '"]');
-    if (base.FEN) {
+    if (base.FEN && !isStandardStart(base.FEN)) {
       tags.push('[SetUp "1"]');
       tags.push('[FEN "' + base.FEN + '"]');
     }
@@ -523,7 +534,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     if (opt.includePlyCount) tags.push('[PlyCount "' + plyCount(merged) + '"]');
 
     var startPly = 0;
-    if (base.FEN) {
+    if (base.FEN && !isStandardStart(base.FEN)) {
       var parts = base.FEN.split(/\s+/);
       var moveNo = parseInt(parts[5] || '1', 10) || 1;
       startPly = (moveNo - 1) * 2 + (parts[1] === 'b' ? 1 : 0);
@@ -554,7 +565,8 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     writeMovetext: writeMovetext,
     countNodes: countNodes,
     chapterOrientation: chapterOrientation,
-    shortenChapter: shortenChapter
+    shortenChapter: shortenChapter,
+    isStandardStart: isStandardStart
   };
 });
 
@@ -618,7 +630,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     var first = null, ok = true;
     on.forEach(function(g){
       if(!g.hasMoves){ ok=false; return; }
-      if(g.tags.FEN){ ok=false; return; }
+      if(g.tags.FEN && !M.isStandardStart(g.tags.FEN)){ ok=false; return; }
       if(g.result && g.result !== '*'){ ok=false; return; }
       var s = g.root.children[0].san;
       if(first === null) first = s;
@@ -758,7 +770,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
           + '<span class="name"><b>'+esc(lineName(g))+'</b><small>'
           + (g.hasMoves ? plies(g.root)+' ply \u00b7 '+esc(firstMoves(g.root,6)) : 'no moves')
           + (g.result && g.result!=='*' ? ' \u00b7 '+esc(g.result) : '')
-          + (g.tags.FEN ? ' \u00b7 FEN' : '')
+          + (g.tags.FEN && !M.isStandardStart(g.tags.FEN) ? ' \u00b7 FEN' : '')
           + '</small></span>'
           + '<span class="acts">'
           + (c.merge ? '<button class="ghost tiny" data-act="top" data-i="'+i+'" title="make this the mainline">\u2191\u2191</button>' : '')
