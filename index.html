@@ -657,19 +657,29 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     if(!el.group.checked) return 'All lines';
     return (g.tags[chapterFrom]||'').trim() || '(no '+chapterFrom+' tag)';
   }
-  function autoMerge(list){
-    var on = list.filter(function(g){ return g.on; });
-    if(on.length < 2) return false;
-    var first = null, ok = true;
-    on.forEach(function(g){
-      if(!g.hasMoves){ ok=false; return; }
-      if(g.tags.FEN && !M.isStandardStart(g.tags.FEN)){ ok=false; return; }
-      if(g.result && g.result !== '*'){ ok=false; return; }
-      var s = g.root.children[0].san;
-      if(first === null) first = s;
-      else if(first !== s) ok = false;
+  // A chapter often mixes real repertoire lines with a line that can't join
+  // them - a text-only "Conclusion"/"Introduction" summary with no moves, a
+  // puzzle from a genuine custom position, a finished model game. Splitting
+  // by first move also matters: "Quickstarter Guide" or "Offbeat first
+  // moves" chapters legitimately cover several different openings at once.
+  // One disqualifying line used to fail the *entire* chapter back to
+  // copy-through; this groups the chapter's lines into whichever clusters
+  // actually share a position, merges each cluster with 2+ lines, and
+  // copies through anything left on its own (a lone line, or one that never
+  // qualified) - all still listed under the same chapter.
+  function partitionAuto(list){
+    var eligible=[], groups=[], byFirst={};
+    list.forEach(function(g){
+      if(g.hasMoves && (!g.tags.FEN || M.isStandardStart(g.tags.FEN)) && (!g.result || g.result === '*')) eligible.push(g);
+      else groups.push({games:[g], merge:false});
     });
-    return ok;
+    eligible.forEach(function(g){
+      var f = g.root.children[0].san;
+      if(!byFirst[f]){ byFirst[f] = {games:[], first:f}; groups.push(byFirst[f]); }
+      byFirst[f].games.push(g);
+    });
+    groups.forEach(function(grp){ if(grp.merge === undefined) grp.merge = grp.games.length >= 2; });
+    return groups;
   }
   function chapters(){
     resolveChapterFrom();
@@ -681,11 +691,18 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     });
     return order.map(function(k){
       var c = map[k];
-      c.auto = autoMerge(c.games);
-      c.mode = modes[k] || 'auto';
-      c.merge = c.mode === 'auto' ? c.auto : c.mode === 'merge';
       c.active = c.games.filter(function(g){ return g.on; });
-      if(c.merge && c.active.length < 2) c.merge = c.active.length === 1 && c.mode === 'merge';
+      var autoPreview = partitionAuto(c.games);
+      c.auto = autoPreview.some(function(g){ return g.merge; });
+      c.mode = modes[k] || 'auto';
+      if(c.mode === 'keep'){
+        c.groups = c.active.map(function(g){ return {games:[g], merge:false}; });
+      } else if(c.mode === 'merge'){
+        c.groups = c.active.length ? [{games:c.active, merge:true}] : [];
+      } else {
+        c.groups = partitionAuto(c.active);
+      }
+      c.merge = c.groups.length > 0 && c.groups.every(function(g){ return g.merge; }) && c.groups.length === 1;
       return c;
     });
   }
@@ -792,12 +809,21 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     el.list.innerHTML = cs.map(function(c){
       var open = openState[c.name];
       if(open === undefined) open = cs.length <= 3;
-      var badge = c.merge
-        ? '<span class="badge merge">merged</span>'
-        : '<span class="badge keep">kept as is</span>';
+      var mergedGroups = c.groups.filter(function(g){ return g.merge; });
+      var keptCount = c.groups.filter(function(g){ return !g.merge; })
+        .reduce(function(n,g){ return n+g.games.length; },0);
+      var badge = mergedGroups.length === 0
+        ? '<span class="badge keep">kept as is</span>'
+        : (keptCount === 0 && mergedGroups.length === 1
+          ? '<span class="badge merge">merged</span>'
+          : '<span class="badge merge">'+mergedGroups.length+' merged</span><span class="badge keep">'+keptCount+' kept</span>');
+      var groupOf = {};
+      c.groups.forEach(function(grp){ grp.games.forEach(function(g){ groupOf[games.indexOf(g)] = grp; }); });
       var rows = c.games.map(function(g){
         var i = games.indexOf(g);
-        var isFirst = c.merge && g.on && c.active[0] === g;
+        var grp = groupOf[i];
+        var inMergingGroup = !!(grp && grp.merge && grp.games.length > 1);
+        var isFirst = inMergingGroup && grp.games[0] === g;
         return '<li class="'+(g.on?'':'off')+(isFirst?' first':'')+'">'
           + '<span class="idx">'+(c.games.indexOf(g)+1)+'</span>'
           + '<span class="name"><b>'+esc(lineName(g))+'</b><small>'
@@ -806,7 +832,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
           + (g.tags.FEN && !M.isStandardStart(g.tags.FEN) ? ' \u00b7 FEN' : '')
           + '</small></span>'
           + '<span class="acts">'
-          + (c.merge ? '<button class="ghost tiny" data-act="top" data-i="'+i+'" title="make this the mainline">\u2191\u2191</button>' : '')
+          + (inMergingGroup ? '<button class="ghost tiny" data-act="top" data-i="'+i+'" title="make this the mainline">\u2191\u2191</button>' : '')
           + '<button class="ghost tiny" data-act="up" data-i="'+i+'" title="move up">\u2191</button>'
           + '<button class="ghost tiny" data-act="down" data-i="'+i+'" title="move down">\u2193</button>'
           + '<button class="ghost tiny" data-act="off" data-i="'+i+'">'+(g.on?'skip':'use')+'</button>'
@@ -873,16 +899,20 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
         : '';
     }
 
-    var merged = cs.filter(function(c){ return c.merge; });
-    var kept = cs.length - merged.length;
     var active = games.filter(function(g){ return g.on; });
     el.inStats.textContent = games.length ? (active.length+' of '+games.length+' games in use') : '';
 
     var w = [];
     if(flashMsg) w.push(flashMsg);
     cs.forEach(function(c){
-      if(c.mode==='merge' && !c.auto && c.active.length>1){
-        w.push('"'+c.name+'" is forced to merge but its games do not share one starting move, so the odd ones become variations before move one.');
+      if(c.mode==='merge' && c.active.length>1){
+        var first=null, differs=false;
+        c.active.forEach(function(g){
+          if(!g.hasMoves) return;
+          var s=g.root.children[0].san;
+          if(first===null) first=s; else if(first!==s) differs=true;
+        });
+        if(differs) w.push('"'+c.name+'" is forced to merge but its games do not share one starting move, so the odd ones become variations before move one.');
       }
     });
     el.warns.innerHTML = w.map(function(m){ return '<div class="warn">'+esc(m)+'</div>'; }).join('');
@@ -894,21 +924,28 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       return;
     }
 
-    var parts = [], trees = {};
+    var parts = [], trees = {}, mergedGroupTotal = 0, keptGameTotal = 0;
     cs.forEach(function(c){
       if(!c.active.length) return;
-      if(c.merge){
-        var res = M.build(c.active, opts());
-        parts.push(res.pgn.replace(/\s+$/,''));
-        trees[c.name] = res.tree;
-      } else {
-        c.active.forEach(function(g){ parts.push(g.raw.replace(/\r?\n/g,'\r\n')); });
-      }
+      var mergingHere = c.groups.filter(function(g){ return g.merge; }).length;
+      c.groups.forEach(function(grp){
+        if(!grp.games.length) return;
+        if(grp.merge){
+          var res = M.build(grp.games, opts());
+          parts.push(res.pgn.replace(/\s+$/,''));
+          var treeKey = mergingHere > 1 ? c.name+' \u2014 '+grp.games[0].root.children[0].san : c.name;
+          trees[treeKey] = res.tree;
+          mergedGroupTotal++;
+        } else {
+          grp.games.forEach(function(g){ parts.push(g.raw.replace(/\r?\n/g,'\r\n')); });
+          keptGameTotal += grp.games.length;
+        }
+      });
     });
     lastPgn = parts.join('\r\n\r\n') + '\r\n\r\n';
     el.out.value = lastPgn;
-    el.outStats.textContent = cs.length+' chapters \u00b7 '+merged.length+' merged \u00b7 '+kept+' copied through \u00b7 '
-      + active.length+' games in, '+(merged.length + cs.reduce(function(n,c){ return n + (c.merge?0:c.active.length); },0))+' games out';
+    el.outStats.textContent = cs.length+' chapters \u00b7 '+mergedGroupTotal+' merged \u00b7 '+keptGameTotal+' copied through \u00b7 '
+      + active.length+' games in, '+(mergedGroupTotal+keptGameTotal)+' games out';
     el.copy.disabled = el.dl.disabled = false;
 
     var names = Object.keys(trees);
