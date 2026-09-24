@@ -159,15 +159,49 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
           <small id="chapterTagNote"></small>
         </div>
         <div class="opt">
-          <input type="checkbox" id="optShortName" checked>
+          <label for="optMainline" style="white-space:nowrap">Mainline of a merged chapter</label>
+          <select id="optMainline">
+            <option value="first">first line in chapter order</option>
+            <option value="longest">longest line</option>
+          </select>
+        </div>
+        <div class="opt" style="padding-left:24px">
+          <small>Reorder lines with the arrows to pick a different one. &ldquo;Longest&rdquo; only applies when the lines open with different first moves.</small>
+        </div>
+        <div class="opt">
+          <label for="optBlackTag" style="white-space:nowrap">Black tag of a merged game</label>
+          <select id="optBlackTag">
+            <option value="blank">? (blank)</option>
+            <option value="line">mainline's line name</option>
+            <option value="chapter">chapter name</option>
+          </select>
+        </div>
+        <div class="opt">
+          <input type="checkbox" id="optShortName">
           <label for="optShortName">Shorten each merged game's name to its first word</label>
         </div>
         <div class="opt" style="padding-left:24px">
           <small>&ldquo;Dutch 6...f5 #1&rdquo; &rarr; &ldquo;Dutch&rdquo;. Numbered chapters like &ldquo;5) Dutch Defense&rdquo; keep their full name.</small>
         </div>
+        <div class="opt" style="padding-left:24px">
+          <label for="optWhiteLimit"><small>cut the merged game's White tag at</small></label>
+          <input type="number" id="optWhiteLimit" value="0" min="0" max="120" style="width:62px">
+          <small>characters (0 = keep all; ChessBase cuts player names at 30)</small>
+        </div>
+        <div class="opt">
+          <input type="checkbox" id="optTransp" checked>
+          <label for="optTransp">Merge transpositions (ChessBase-style)</label>
+        </div>
+        <div class="opt" style="padding-left:24px">
+          <small>A line that reaches a position already in the tree by another move order continues from there. Its connecting moves are dropped only if they carry no comments.</small>
+        </div>
         <div class="opt">
           <input type="checkbox" id="optLabel" checked>
-          <label for="optLabel">Tag each merged line's last comment with its game name</label>
+          <label for="optLabel">Tag each merged line's last comment with its game name,</label>
+          <select id="optLabelPos">
+            <option value="after">after the comment</option>
+            <option value="before">before the comment</option>
+          </select>
         </div>
         <div class="opt" style="padding-left:24px">
           <label for="optLimit"><small>cut the Black tag at</small></label>
@@ -220,7 +254,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
 </section>
 
 <footer>
-  Everything runs in this page and nothing is uploaded. A chapter merges by name alone: every line with moves and no finished result joins one game, even if some open with a different first move - they just become their own variation before move one. A line with no moves, a genuine custom position, or a finished result (model games, tactics) is copied through instead, no matter what else is in the chapter. Override any chapter with its own dropdown. Merging matches moves by notation, so lines reaching the same position by a different move order stay on separate branches.
+  Everything runs in this page and nothing is uploaded. A chapter merges by name alone: every line with moves and no finished result joins one game, even if some open with a different first move - they just become their own variation before move one. A line with no moves, a genuine custom position, or a finished result (model games, tactics) is copied through instead, in its original place in the chapter. Every move is checked against the board, so a move a course only mentions inside a comment stays text instead of becoming a phantom move. Override any chapter with its own dropdown; your format options are remembered in this browser. Merging matches moves by notation, so lines reaching the same position by a different move order stay on separate branches.
 </footer>
 
 </div>
@@ -237,6 +271,10 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
 
   function splitGames(text) {
     text = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').replace(/\uE02D/g, '@');
+    // Some tools write the next game's header on the same line as the last
+    // result ("... 9. Be3 ) *[Event "?"]"); without a line break the next
+    // game was read as part of this one.
+    text = text.replace(/(1-0|0-1|1\/2-1\/2|\*)[ \t]*(\[[A-Za-z]\w*\s+")/g, '$1\n\n$2');
     var lines = text.split('\n');
     var games = [], cur = [], seenMoves = false;
     for (var i = 0; i < lines.length; i++) {
@@ -268,8 +306,185 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     return {
       san: san || null,
       key: key || (san ? san.replace(/[?!]+$/, '') : null),
-      comments: [], nags: [], children: [], parent: parent || null
+      pre: [], comments: [], nags: [], children: [], parent: parent || null
     };
+  }
+
+  // ---- minimal legal-move engine -------------------------------------
+  // Just enough chess to tell whether a SAN token is a move that can
+  // actually be played in the position reached so far. Board index =
+  // rank*8 + file, rank 0 = White's first rank.
+  var START_FEN = 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
+  var KN = [[1,2],[2,1],[2,-1],[1,-2],[-1,-2],[-2,-1],[-2,1],[-1,2]];
+  var KG = [[1,0],[1,1],[0,1],[-1,1],[-1,0],[-1,-1],[0,-1],[1,-1]];
+  var DIAG = [[1,1],[1,-1],[-1,1],[-1,-1]];
+  var ORTH = [[1,0],[-1,0],[0,1],[0,-1]];
+
+  function parseFen(fen) {
+    var parts = String(fen || START_FEN).trim().split(/\s+/);
+    var rows = (parts[0] || '').split('/');
+    if (rows.length !== 8) return null;
+    var b = [], r, i;
+    for (i = 0; i < 64; i++) b.push(null);
+    for (r = 0; r < 8; r++) {
+      var f = 0, row = rows[r];
+      for (i = 0; i < row.length; i++) {
+        var ch = row[i];
+        if (/\d/.test(ch)) f += +ch;
+        else if (/[pnbrqkPNBRQK]/.test(ch)) { if (f > 7) return null; b[(7 - r) * 8 + f] = ch; f++; }
+        else return null;
+      }
+      if (f !== 8) return null;
+    }
+    var ep = -1;
+    if (parts[3] && /^[a-h][36]$/.test(parts[3])) ep = (parts[3].charCodeAt(1) - 49) * 8 + (parts[3].charCodeAt(0) - 97);
+    return { b: b, w: (parts[1] || 'w') !== 'b', c: parts[2] && parts[2] !== '-' ? parts[2] : '', ep: ep };
+  }
+
+  function isWhitePiece(p) { return !!p && p === p.toUpperCase(); }
+  function onBoard(f, r) { return f >= 0 && f < 8 && r >= 0 && r < 8; }
+
+  function attacked(pos, sq, byWhite) {
+    var b = pos.b, f = sq & 7, r = sq >> 3, i, t, nf, nr, p;
+    var P = byWhite ? 'P' : 'p', N = byWhite ? 'N' : 'n', K = byWhite ? 'K' : 'k';
+    var B = byWhite ? 'B' : 'b', R = byWhite ? 'R' : 'r', Q = byWhite ? 'Q' : 'q';
+    var pr = byWhite ? r - 1 : r + 1;
+    if (onBoard(f - 1, pr) && b[pr * 8 + f - 1] === P) return true;
+    if (onBoard(f + 1, pr) && b[pr * 8 + f + 1] === P) return true;
+    for (i = 0; i < 8; i++) {
+      nf = f + KN[i][0]; nr = r + KN[i][1];
+      if (onBoard(nf, nr) && b[nr * 8 + nf] === N) return true;
+      nf = f + KG[i][0]; nr = r + KG[i][1];
+      if (onBoard(nf, nr) && b[nr * 8 + nf] === K) return true;
+    }
+    for (i = 0; i < 4; i++) {
+      for (t = 1; ; t++) {
+        nf = f + DIAG[i][0] * t; nr = r + DIAG[i][1] * t;
+        if (!onBoard(nf, nr)) break;
+        p = b[nr * 8 + nf];
+        if (p) { if (p === B || p === Q) return true; break; }
+      }
+      for (t = 1; ; t++) {
+        nf = f + ORTH[i][0] * t; nr = r + ORTH[i][1] * t;
+        if (!onBoard(nf, nr)) break;
+        p = b[nr * 8 + nf];
+        if (p) { if (p === R || p === Q) return true; break; }
+      }
+    }
+    return false;
+  }
+
+  function pseudoMoves(pos) {
+    var b = pos.b, w = pos.w, out = [], sq, p, f, r, i, t, nf, nr, to, q;
+    function add(from, dest, promo, castle) { out.push({ from: from, to: dest, promo: promo || null, castle: castle || null }); }
+    function addPawn(from, dest, last) {
+      if ((dest >> 3) === last) { add(from, dest, 'Q'); add(from, dest, 'R'); add(from, dest, 'B'); add(from, dest, 'N'); }
+      else add(from, dest);
+    }
+    for (sq = 0; sq < 64; sq++) {
+      p = b[sq];
+      if (!p || isWhitePiece(p) !== w) continue;
+      f = sq & 7; r = sq >> 3;
+      var up = p.toUpperCase();
+      if (up === 'P') {
+        var dir = w ? 1 : -1, last = w ? 7 : 0, startR = w ? 1 : 6;
+        nr = r + dir;
+        if (onBoard(f, nr) && !b[nr * 8 + f]) {
+          addPawn(sq, nr * 8 + f, last);
+          if (r === startR && !b[(r + 2 * dir) * 8 + f]) add(sq, (r + 2 * dir) * 8 + f);
+        }
+        for (i = -1; i <= 1; i += 2) {
+          if (!onBoard(f + i, nr)) continue;
+          to = nr * 8 + f + i; q = b[to];
+          if ((q && isWhitePiece(q) !== w) || to === pos.ep) addPawn(sq, to, last);
+        }
+      } else if (up === 'N' || up === 'K') {
+        var offs = up === 'N' ? KN : KG;
+        for (i = 0; i < 8; i++) {
+          nf = f + offs[i][0]; nr = r + offs[i][1];
+          if (!onBoard(nf, nr)) continue;
+          to = nr * 8 + nf; q = b[to];
+          if (!q || isWhitePiece(q) !== w) add(sq, to);
+        }
+        var home = w ? 4 : 60;
+        if (up === 'K' && sq === home) {
+          if (pos.c.indexOf(w ? 'K' : 'k') !== -1 && !b[home + 1] && !b[home + 2] && b[home + 3] === (w ? 'R' : 'r')) add(sq, home + 2, null, 'K');
+          if (pos.c.indexOf(w ? 'Q' : 'q') !== -1 && !b[home - 1] && !b[home - 2] && !b[home - 3] && b[home - 4] === (w ? 'R' : 'r')) add(sq, home - 2, null, 'Q');
+        }
+      } else {
+        var dirs = up === 'B' ? DIAG : up === 'R' ? ORTH : DIAG.concat(ORTH);
+        for (i = 0; i < dirs.length; i++) {
+          for (t = 1; ; t++) {
+            nf = f + dirs[i][0] * t; nr = r + dirs[i][1] * t;
+            if (!onBoard(nf, nr)) break;
+            to = nr * 8 + nf; q = b[to];
+            if (!q) { add(sq, to); continue; }
+            if (isWhitePiece(q) !== w) add(sq, to);
+            break;
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  function applyMove(pos, m) {
+    var b = pos.b.slice(), p = b[m.from], w = pos.w, c = pos.c, ep = -1;
+    var up = p.toUpperCase();
+    if (up === 'P' && m.to === pos.ep && !b[m.to]) b[m.to + (w ? -8 : 8)] = null;
+    b[m.to] = m.promo ? (w ? m.promo : m.promo.toLowerCase()) : p;
+    b[m.from] = null;
+    if (m.castle === 'K') { b[m.from + 1] = b[m.from + 3]; b[m.from + 3] = null; }
+    if (m.castle === 'Q') { b[m.from - 1] = b[m.from - 4]; b[m.from - 4] = null; }
+    if (up === 'P' && Math.abs(m.to - m.from) === 16) ep = (m.from + m.to) / 2;
+    if (up === 'K') c = c.replace(w ? /[KQ]/g : /[kq]/g, '');
+    if (m.from === 0 || m.to === 0) c = c.replace('Q', '');
+    if (m.from === 7 || m.to === 7) c = c.replace('K', '');
+    if (m.from === 56 || m.to === 56) c = c.replace('q', '');
+    if (m.from === 63 || m.to === 63) c = c.replace('k', '');
+    return { b: b, w: !w, c: c, ep: ep };
+  }
+
+  function isLegal(pos, m) {
+    if (m.castle) {
+      var step = m.castle === 'K' ? 1 : -1;
+      if (attacked(pos, m.from, !pos.w) || attacked(pos, m.from + step, !pos.w)) return false;
+    }
+    var nx = applyMove(pos, m), king = nx.b.indexOf(pos.w ? 'K' : 'k');
+    return king !== -1 && !attacked(nx, king, !pos.w);
+  }
+
+  // SAN -> the legal move it names in `pos`, or null. Lenient about check
+  // marks, annotation glyphs, over-disambiguation and "e8Q"-style promotions.
+  function resolveSan(pos, san) {
+    var s = String(san).replace(/[+#!?]+/g, '').replace(/e\.p\.$/, '');
+    var i, m, cands;
+    if (/^(O-O-O|0-0-0)$/.test(s) || /^(O-O|0-0)$/.test(s)) {
+      var side = /^(O-O-O|0-0-0)$/.test(s) ? 'Q' : 'K';
+      cands = pseudoMoves(pos);
+      for (i = 0; i < cands.length; i++) if (cands[i].castle === side && isLegal(pos, cands[i])) return cands[i];
+      return null;
+    }
+    var piece, file = null, rank = null, dest, promo = null;
+    if ((m = s.match(/^([NBRQK])([a-h])?([1-8])?x?-?([a-h][1-8])$/))) {
+      piece = m[1]; file = m[2] || null; rank = m[3] || null; dest = m[4];
+    } else if ((m = s.match(/^([a-h])(?:([1-8])?x?-?([a-h][1-8])|([1-8]))(?:=?\(?([NBRQ])\)?)?$/))) {
+      piece = 'P';
+      if (m[3]) { file = m[1]; rank = m[2] || null; dest = m[3]; } else dest = m[1] + m[4];
+      promo = m[5] || null;
+    } else return null;
+    var to = (dest.charCodeAt(1) - 49) * 8 + (dest.charCodeAt(0) - 97);
+    cands = pseudoMoves(pos);
+    for (i = 0; i < cands.length; i++) {
+      var x = cands[i];
+      if (x.to !== to || x.castle || pos.b[x.from].toUpperCase() !== piece) continue;
+      if (file && (x.from & 7) !== file.charCodeAt(0) - 97) continue;
+      if (rank && (x.from >> 3) !== rank.charCodeAt(0) - 49) continue;
+      if (piece === 'P' && !file && (x.from & 7) !== (to & 7)) continue;
+      if (x.promo && x.promo !== (promo || 'Q')) continue;
+      if (isLegal(pos, x)) return x;
+    }
+    return null;
   }
 
   function parseGame(chunk, opts) {
@@ -284,80 +499,118 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     }
     var movetext = chunk.slice(lastEnd);
 
-    var root = newNode(null, null);
-    var node = root;
-    var stack = [];
-    var pendingNum = null;   // normalized text of the last move-number token
-                              // seen, consumed by the very next move token
-    var result = null;
+    // Parse with a legality check first. Move numbers are ignored entirely -
+    // exporters number them every which way ("1. c4 1. e5", "7...Bb7") - so
+    // the only reliable way to tell a real move from a mention is whether
+    // it can actually be played. If any token can't be explained at all
+    // (malformed source, or an engine gap), fall back to the plain parse
+    // for this one game so a bad guess can't cascade through it.
+    var start = tags.FEN ? parseFen(tags.FEN) : parseFen(START_FEN);
+    var parsed = start && parseMovetext(movetext, normalize, start);
+    var validated = !!(parsed && !parsed.suspect);
+    if (!validated) parsed = parseMovetext(movetext, normalize, null);
+    return {
+      validated: validated,
+      tags: tags,
+      root: parsed.root,
+      result: parsed.result || tags.Result || '*',
+      raw: chunk.replace(/^\n+|\s+$/g, ''),
+      hasMoves: parsed.root.children.length > 0
+    };
+  }
 
+  var GLYPH_NAG = { '+-': '$18', '-+': '$19', '+/-': '$16', '-/+': '$17', '±': '$16', '∓': '$17',
+                    '+=': '$14', '=+': '$15', '⩲': '$14', '⩱': '$15', '=': '$10', '∞': '$13', '=/∞': '$44' };
+
+  // `start` = position to validate from, or null for a plain parse that
+  // trusts every move-shaped token.
+  function parseMovetext(movetext, normalize, start) {
+    var root = newNode(null, null);
+    root.pos = start;
+    var node = root, stack = [], result = null, suspect = false;
+    var atVarStart = false, preBuf = [], unexplained = false;
+
+    // "0-0"/"0-0-0" (castling written with zeros, common in older books) is
+    // matched explicitly - it used to fall through and vanish.
     var tokenRe =
-      /(\{[^}]*\})|(;[^\n]*)|(\()|(\))|(\$\d+)|(1-0|0-1|1\/2-1\/2|\*)|(\d+\s*\.(?:\s*\.\.)?)|([NBRQKOa-h][^\s(){};]*)/g;
+      /(\{[^}]*\})|(;[^\n]*)|(\()|(\))|(\$\d+)|(1-0|0-1|1\/2-1\/2|\*)|(\d+\s*\.(?:\s*\.\.)?)|((?:0-0-0|0-0)[+#!?]*|[NBRQKOa-h][^\s(){};]*|Z0|--)/g;
     var t;
     while ((t = tokenRe.exec(movetext))) {
       if (t[1]) {
         var c = cleanComment(t[1].slice(1, -1), normalize);
-        if (c) node.comments.push(c);
+        // A comment right after "(" introduces that variation's first move
+        // ("4. Bd2 ({White's main line, outnumbering} 4. Nbd2 ...)") - it
+        // belongs before that move, not glued onto the move before "(".
+        if (c) (atVarStart ? preBuf : node.comments).push(c);
       } else if (t[2]) {
         continue;
       } else if (t[3]) {
         stack.push(node);
         node = node.parent || root;
-        pendingNum = null;
+        atVarStart = true;
       } else if (t[4]) {
         node = stack.pop() || root;
-        pendingNum = null;
+        if (preBuf.length) { node.comments = node.comments.concat(preBuf); preBuf = []; }
+        atVarStart = false;
       } else if (t[5]) {
         node.nags.push(t[5]);
       } else if (t[6]) {
         result = t[6];
-        pendingNum = null;
       } else if (t[7]) {
-        pendingNum = t[7].replace(/\s+/g, '');
         continue;
       } else if (t[8]) {
-        var full = t[8];
-        var san = full.replace(/[?!]+$/, '');
-        if (!/^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?$|^O-O(-O)?[+#]?$|^0-0(-0)?[+#]?$/.test(san)) { pendingNum = null; continue; }
-        var myNum = pendingNum;
-        pendingNum = null;
-        // Chessable sometimes mentions a move inline instead of playing it,
-        // splitting a comment around it: restating the move it's annotating
-        // ("7.Qc2 {is a...} 7.Qc2 {...}"), or listing a second candidate
-        // without wrapping it in its own variation ("10.Nc3 {,or} 10.Rd1
-        // {.}"). Both share a tell: the new token's own explicit move-number
-        // repeats the one already on the node we're sitting on, which no two
-        // genuinely sequential real moves ever do. Fold it into the comment
-        // text instead of adding a phantom node - strict PGN readers choke
-        // on a second move for a side that hasn't moved and desync every
-        // move number after it.
-        //
-        // Restricted to inside a variation (stack.length, i.e. we're past at
-        // least one "("): at least one course in the wild numbers its bare
-        // *mainline* "1. c4 1. e5 2. g3 2. Nf6" - "N." for both colors, never
-        // "N..." - which looks identical to the bug by move-number alone.
-        // That convention was only ever seen at the top level; inside every
-        // variation in every file checked, a real reply is always numbered
-        // "N..." when numbered at all. Applying the check there caused
-        // thousands of false positives before this restriction was added.
-        var sameNumAsCurrent = stack.length > 0 && node !== root && myNum !== null && myNum === node.declaredNum;
-        if (sameNumAsCurrent || (node !== root && san === node.key)) {
-          node.comments.push(full);
-          continue;
+        var full = t[8], glyphNag = null;
+        // An evaluation sign written straight onto the move ("Bxf5-+",
+        // "Qxb5±", "Nf3=") isn't part of the SAN - left on, the move was
+        // rejected and silently dropped, shifting every later move to the
+        // wrong side. Peel it off into the standard PGN annotation instead.
+        var gm = full.match(/(\+\/-|-\/\+|\+-|-\+|\+=|=\+|=\/∞|[±∓⩲⩱∞]|=)$/);
+        if (gm && full.length > gm[1].length && (gm[1] !== '=' || /[1-8+#]=$/.test(full))) {
+          glyphNag = GLYPH_NAG[gm[1]];
+          full = full.slice(0, -gm[1].length);
         }
-        var child = newNode(full, node, san);
-        child.declaredNum = myNum;
+        var san = full.replace(/[?!]+$/, '');
+        var isNull = san === 'Z0' || san === '--';
+        if (!isNull && !/^[NBRQK]?[a-h]?[1-8]?x?[a-h][1-8](=[NBRQ])?[+#]?$|^O-O(-O)?[+#]?$|^0-0(-0)?[+#]?$/.test(san)) continue;
+        var nextPos = null;
+        if (start) {
+          if (isNull) nextPos = { b: node.pos.b, w: !node.pos.w, c: node.pos.c, ep: -1 };
+          else {
+            var mv = resolveSan(node.pos, san);
+            if (mv) nextPos = applyMove(node.pos, mv);
+            else if (node.parent && resolveSan(node.parent.pos, san)) {
+              // Not playable here, but it is playable one move back: it's
+              // the move just played restated, or a second candidate for it
+              // listed without its own variation - "7.Qc2 {is a...} 7.Qc2
+              // {...}", "10.Nc3 {, or} 10.Rd1 {.}". Chessable writes these
+              // as bare moves in the middle of a comment. Keep it as text.
+              if (preBuf.length) { node.comments = node.comments.concat(preBuf); preBuf = []; }
+              node.comments.push(full);
+              atVarStart = false;
+              continue;
+            } else if (!unexplained) {
+              // Playable nowhere nearby - usually a bare square mentioned in
+              // prose ("{...capture on} d5 {, for example}"). Keep it as text.
+              // A second one in a row means we've lost track of the position,
+              // so give up on this game and re-read it without checks.
+              if (preBuf.length) { node.comments = node.comments.concat(preBuf); preBuf = []; }
+              node.comments.push(full);
+              unexplained = true;
+              continue;
+            } else { suspect = true; break; }
+          }
+        }
+        unexplained = false;
+        var child = newNode(full, node, isNull ? 'Z0' : san);
+        child.pos = nextPos;
+        if (glyphNag) child.nags.push(glyphNag);
+        if (preBuf.length) { child.pre = preBuf; preBuf = []; }
         node.children.push(child);
         node = child;
+        atVarStart = false;
       }
     }
-    return {
-      tags: tags,
-      root: root,
-      result: result || tags.Result || '*',
-      raw: chunk.replace(/^\n+|\s+$/g, ''),
-      hasMoves: root.children.length > 0
-    };
+    return { root: root, result: result, suspect: suspect };
   }
 
   function mainlineLeaf(root) {
@@ -366,12 +619,28 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     return n === root ? null : n;
   }
 
-  function gameLabel(tags, limit) {
-    var w = (tags.White || '').trim();
-    var b = (tags.Black || '').trim();
-    if (limit > 0) b = b.slice(0, limit).replace(/\s+$/, '');
+  // The chapter name as it appears in a merged game's White tag.
+  function chapterTitle(v, opt) {
+    v = String(v == null ? '' : v).trim();
+    if (opt.shortenChapterName) v = shortenChapter(v);
+    if (opt.whiteTagLimit > 0) v = v.slice(0, opt.whiteTagLimit).replace(/\s+$/, '');
+    return v;
+  }
+
+  // "Chapter-Line" name added to the last comment of each merged line.
+  function gameLabel(tags, opt) {
+    var chapKey = opt.chapterFrom === 'Black' ? 'Black' : 'White';
+    var w = chapterTitle(tags[chapKey], opt);
+    var b = String(tags[chapKey === 'Black' ? 'White' : 'Black'] || '').trim();
+    if (opt.blackTagLimit > 0) b = b.slice(0, opt.blackTagLimit).replace(/\s+$/, '');
     if (w && b) return w + '-' + b;
     return w || b || '';
+  }
+
+  function posKey(p) {
+    var s = '';
+    for (var i = 0; i < 64; i++) s += p.b[i] || '.';
+    return s + (p.w ? 'w' : 'b') + p.c + ':' + p.ep;
   }
 
   // "Dutch 6...f5 #1" -> "Dutch", "Quickstarter Guide" -> "Quickstarter".
@@ -418,23 +687,49 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   }
 
   function insertNode(target, source, ctx) {
+    // `used` keeps two siblings with the same move *inside one line* as two
+    // separate branches, the way the source wrote them ("2. Nf3 {...}
+    // ({White can start with} 2. Nf3 {...})"). Only the same move coming
+    // from different lines gets folded together.
+    var used = [];
     for (var i = 0; i < source.children.length; i++) {
       var sc = source.children[i];
-      var tc = null;
+      var tc = null, sameKey = false, jumped = false;
       for (var j = 0; j < target.children.length; j++) {
-        if (target.children[j].key === sc.key) { tc = target.children[j]; break; }
+        var cand = target.children[j];
+        if (cand.key === sc.key) { sameKey = true; if (used.indexOf(cand) === -1) { tc = cand; break; } }
+      }
+      // Transposition: this move isn't in the tree here, but the position it
+      // reaches is - reached by another move order. Carry on from that
+      // position (ChessBase does the same), moving this move's notes there,
+      // instead of growing a parallel branch.
+      if (!tc && !sameKey && ctx.index && sc.pos) {
+        var hit = ctx.index[posKey(sc.pos)];
+        var allowed = hit && (hit.line !== ctx.line ? true : ctx.selfJump === 'all' || (ctx.selfJump === 'notFirst' && ctx.line > 0));
+        if (allowed) { tc = hit.node; jumped = true; ctx.jumpFrom.push(target); }
       }
       if (!tc) {
         tc = newNode(sc.san, target, sc.key);
+        tc.pos = sc.pos || null;
+        tc.line = ctx.line;
         target.children.push(tc);
+        if (ctx.index && tc.pos) {
+          var pk = posKey(tc.pos);
+          if (!ctx.index[pk]) ctx.index[pk] = { node: tc, line: ctx.line };
+        }
       }
+      if (!jumped) used.push(tc);
       for (var n = 0; n < sc.nags.length; n++) {
         if (tc.nags.indexOf(sc.nags[n]) === -1) tc.nags.push(sc.nags[n]);
       }
+      for (var pc = 0; pc < sc.pre.length; pc++) {
+        if (tc.pre.indexOf(sc.pre[pc]) === -1) tc.pre.push(sc.pre[pc]);
+      }
       var comments = sc.comments.slice();
-      if (ctx.prefix && sc === ctx.leaf) {
-        if (!comments.length) comments = [ctx.prefix];
-        else comments = comments.map(function (c) { return ctx.prefix + ' ' + c; });
+      if (ctx.label && sc === ctx.leaf) {
+        if (!comments.length) comments = [ctx.label];
+        else if (ctx.labelAfter) comments[comments.length - 1] += ' ' + ctx.label;
+        else comments[0] = ctx.label + ' ' + comments[0];
       }
       for (var k = 0; k < comments.length; k++) {
         if (tc.comments.indexOf(comments[k]) === -1) tc.comments.push(comments[k]);
@@ -443,14 +738,41 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     }
   }
 
+  // A route that only existed to reach a transposed position - moves added
+  // for this line, with no notes of their own, now leading nowhere - is
+  // dropped, the way ChessBase drops it. A route that carries any comment or
+  // annotation is kept, so no text is lost.
+  function pruneRoutes(ctx) {
+    for (var i = 0; i < ctx.jumpFrom.length; i++) {
+      var n = ctx.jumpFrom[i];
+      while (n && n.parent && n.line === ctx.line && !n.children.length &&
+             !n.comments.length && !n.pre.length && !n.nags.length) {
+        var p = n.parent;
+        p.children.splice(p.children.indexOf(n), 1);
+        if (n.pos) {
+          var pk = posKey(n.pos);
+          if (ctx.index[pk] && ctx.index[pk].node === n) delete ctx.index[pk];
+        }
+        n = p;
+      }
+    }
+  }
+
   function mergeGames(games, opt) {
     var root = newNode(null, null);
+    var index = opt.mergeTranspositions === false ? null : {};
     for (var i = 0; i < games.length; i++) {
       var g = games[i];
-      var prefix = i === 0 || !opt.labelLines ? null : gameLabel(g.tags, opt.blackTagLimit);
-      insertNode(root, g.root, { leaf: prefix ? mainlineLeaf(g.root) : null, prefix: prefix });
+      var label = i === 0 || !opt.labelLines ? null : gameLabel(g.tags, opt);
+      var ctx = { leaf: label ? mainlineLeaf(g.root) : null, label: label,
+                  labelAfter: opt.labelPosition !== 'before',
+                  index: index, line: i, jumpFrom: [], selfJump: opt._selfJump || 'notFirst' };
+      insertNode(root, g.root, ctx);
+      if (index) pruneRoutes(ctx);
+      // Every line's opening comment (the text before its first move) is
+      // kept, not just the first line's - later ones used to be dropped.
       for (var c = 0; c < g.root.comments.length; c++) {
-        if (root.comments.indexOf(g.root.comments[c]) === -1 && i === 0) root.comments.push(g.root.comments[c]);
+        if (root.comments.indexOf(g.root.comments[c]) === -1) root.comments.push(g.root.comments[c]);
       }
     }
     return root;
@@ -464,6 +786,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
 
     function emit(node, ply) {
       var num = Math.floor(ply / 2) + 1;
+      if (node.pre && node.pre.length) { out.push('{' + node.pre.join(' ') + '}'); needNum = true; }
       if (ply % 2 === 0) out.push(num + '.');
       else if (needNum) out.push(num + '...');
       out.push(node.san);
@@ -526,9 +849,15 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     includePlyCount: true,
     wrap: 0,
     keepExtraTags: false,
-    shortenChapterName: true,
+    shortenChapterName: false,
+    blackTag: 'blank',      // merged game's [Black]: 'blank' ("?"), 'line' (first line's name), 'chapter'
+    whiteTagLimit: 0,       // cut the merged game's [White] at N characters, 0 = keep all
+    mergeTranspositions: true, // join a line at a position an earlier line already reached
+    labelPosition: 'after',    // line name after ('after') or before ('before') its last comment
     result: '*'
   };
+
+  function tagValue(v) { return String(v).replace(/\\/g, '\\\\').replace(/"/g, '\\"'); }
 
   function build(games, options) {
     var opt = {};
@@ -546,13 +875,16 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     for (var i = 0; i < order.length; i++) {
       var key = order[i];
       var v = key === 'White' ? base[chapKey] : key === 'Black' ? base[lineKey] : base[key];
-      if (v === undefined) v = key === 'Date' ? '????.??.??' : '?';
+      if (key === 'Black' && opt.blackTag === 'blank') v = '?';
+      if (key === 'Black' && opt.blackTag === 'chapter') v = base[chapKey];
+      if (v === undefined || v === '') v = key === 'Date' ? '????.??.??' : '?';
       if (key === 'Result') v = opt.result;
-      if (key === 'White' && opt.shortenChapterName !== false) v = shortenChapter(v);
-      tags.push('[' + key + ' "' + v + '"]');
+      if (key === 'White') v = chapterTitle(v, opt) || '?';
+      tags.push('[' + key + ' "' + tagValue(v) + '"]');
     }
-    if (opt.annotator) tags.push('[Annotator "' + opt.annotator + '"]');
-    if (base.ECO) tags.push('[ECO "' + base.ECO + '"]');
+    // ChessBase's order: ECO before Annotator.
+    if (base.ECO) tags.push('[ECO "' + tagValue(base.ECO) + '"]');
+    if (opt.annotator) tags.push('[Annotator "' + tagValue(opt.annotator) + '"]');
     if (base.FEN && !isStandardStart(base.FEN)) {
       tags.push('[SetUp "1"]');
       tags.push('[FEN "' + base.FEN + '"]');
@@ -599,7 +931,9 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     countNodes: countNodes,
     chapterOrientation: chapterOrientation,
     shortenChapter: shortenChapter,
-    isStandardStart: isStandardStart
+    isStandardStart: isStandardStart,
+    parseFen: parseFen,
+    resolveSan: resolveSan
   };
 });
 
@@ -625,8 +959,29 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     copy:$('copy'), dl:$('dl'), cChapters:$('cChapters'), inStats:$('inStats'), outStats:$('outStats'),
     group:$('optGroup'), label:$('optLabel'), limit:$('optLimit'), ply:$('optPly'),
     space:$('optSpace'), wrap:$('optWrap'), ann:$('optAnn'), shortName:$('optShortName'),
-    chapterTag:$('optChapterTag'), chapterTagNote:$('chapterTagNote')
+    chapterTag:$('optChapterTag'), chapterTagNote:$('chapterTagNote'),
+    mainline:$('optMainline'), blackTag:$('optBlackTag'), whiteLimit:$('optWhiteLimit'),
+    transp:$('optTransp'), labelPos:$('optLabelPos')
   };
+
+  // Remember the format options between visits (per browser).
+  var SAVED = ['optGroup','optChapterTag','optMainline','optBlackTag','optShortName','optWhiteLimit',
+               'optTransp','optLabel','optLabelPos','optLimit','optPly','optSpace','optWrap','optAnn'];
+  function saveOpts(){
+    var o = {};
+    SAVED.forEach(function(id){ var x=$(id); o[id] = x.type === 'checkbox' ? x.checked : x.value; });
+    try { localStorage.setItem('pgnMergeOpts', JSON.stringify(o)); } catch(e){}
+  }
+  (function loadOpts(){
+    var o;
+    try { o = JSON.parse(localStorage.getItem('pgnMergeOpts') || 'null'); } catch(e){ o = null; }
+    if (!o) return;
+    SAVED.forEach(function(id){
+      var x=$(id);
+      if (!(id in o)) return;
+      if (x.type === 'checkbox') x.checked = !!o[id]; else x.value = o[id];
+    });
+  })();
 
   function esc(s){ return String(s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
   function opts(){
@@ -636,6 +991,10 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       includePlyCount: el.ply.checked,
       wrap: el.wrap.checked ? 80 : 0,
       shortenChapterName: el.shortName.checked,
+      blackTag: el.blackTag.value,
+      whiteTagLimit: parseInt(el.whiteLimit.value,10) || 0,
+      mergeTranspositions: el.transp.checked,
+      labelPosition: el.labelPos.value,
       chapterFrom: chapterFrom,
       annotator: el.ann.value.trim()
     };
@@ -667,23 +1026,45 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   // variation ("before move one") in the merged game rather than splitting
   // the chapter into several separate outputs.
   //
-  // Order still sets the mainline (the footer note above the list) whenever
-  // every eligible line actually starts the same way - drag with up/down/
-  // top as usual. Only when they genuinely open with different first moves,
-  // where there's no natural "next" line to prefer, does the longest one
-  // default to the mainline instead of whichever happened to sit first in
-  // the source file.
-  function partitionAuto(list){
-    var eligible=[], groups=[];
-    list.forEach(function(g){
-      if(g.hasMoves && (!g.tags.FEN || M.isStandardStart(g.tags.FEN)) && (!g.result || g.result === '*')) eligible.push(g);
-      else groups.push({games:[g], merge:false});
+  // Order sets the mainline by default (the first line in the chapter, after
+  // any reordering with the arrows). The "longest line" option instead
+  // promotes the longest line, but only when the lines open with different
+  // first moves - where there's no natural "next" line to prefer.
+  //
+  // Groups come out in the chapter's own order: the merged game sits where
+  // its first line was, so an intro before it stays before it and a
+  // "Conclusion" after it stays after it.
+  // Text-only entries (an Introduction, a chapter's "Conclusion") are
+  // exported as "{text} 1. Z0" - a null move - so "has moves" alone isn't
+  // enough: a line whose main line opens with a null move isn't a line.
+  function isRealLine(g){
+    return g.hasMoves && g.root.children[0].key !== 'Z0';
+  }
+  // Content that's never repertoire, whatever its moves look like: model or
+  // illustrative games, introductions, summaries, references, conclusions,
+  // puzzles/exercises. A whole chapter with such a name is kept as is, and
+  // so is a single line with such a name inside an ordinary chapter.
+  // A "Quickstarter" chapter is repertoire even if it's also called an intro.
+  var KEEP_CHAPTER = /\b(games?|introduction|intro|summary|summaries|references?|conclusions?|puzzles?|exercises?|tests?|quiz|tactics)\b/i;
+  var KEEP_LINE = /^\s*(introduction|intro|summary|conclusion|references?)\b/i;
+  function keptChapter(name){ return KEEP_CHAPTER.test(name) && !/quickstart/i.test(name); }
+  function keptLine(g){ return KEEP_LINE.test(lineName(g)); }
+  function partitionAuto(list, chapterName){
+    var eligible=[], groups=[], mergedAt=-1;
+    var keepAll = keptChapter(chapterName || '');
+    list.forEach(function(g, i){
+      if(!keepAll && !keptLine(g) && isRealLine(g) && (!g.tags.FEN || M.isStandardStart(g.tags.FEN)) && (!g.result || g.result === '*')){
+        if(mergedAt < 0) mergedAt = groups.length;
+        eligible.push(g);
+      } else groups.push({games:[g], merge:false});
     });
     if(eligible.length){
       var first = eligible[0].root.children[0].san;
       var sameFirst = eligible.every(function(g){ return g.root.children[0].san === first; });
-      var ordered = sameFirst ? eligible : eligible.slice().sort(function(a,b){ return plies(b.root)-plies(a.root); });
-      groups.push({games: ordered, merge: ordered.length >= 2});
+      var ordered = (el.mainline.value === 'longest' && !sameFirst)
+        ? eligible.slice().sort(function(a,b){ return plies(b.root)-plies(a.root); })
+        : eligible;
+      groups.splice(mergedAt, 0, {games: ordered, merge: ordered.length >= 2});
     }
     return groups;
   }
@@ -698,7 +1079,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
     return order.map(function(k){
       var c = map[k];
       c.active = c.games.filter(function(g){ return g.on; });
-      var autoPreview = partitionAuto(c.games);
+      var autoPreview = partitionAuto(c.games, c.name);
       c.auto = autoPreview.some(function(g){ return g.merge; });
       c.mode = modes[k] || 'auto';
       if(c.mode === 'keep'){
@@ -706,7 +1087,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       } else if(c.mode === 'merge'){
         c.groups = c.active.length ? [{games:c.active, merge:true}] : [];
       } else {
-        c.groups = partitionAuto(c.active);
+        c.groups = partitionAuto(c.active, c.name);
       }
       c.merge = c.groups.length > 0 && c.groups.every(function(g){ return g.merge; }) && c.groups.length === 1;
       return c;
@@ -750,9 +1131,12 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   el.expand.addEventListener('click', function(){ chapters().forEach(function(c){ openState[c.name]=true; }); render(); });
   el.collapse.addEventListener('click', function(){ chapters().forEach(function(c){ openState[c.name]=false; }); render(); });
   el.space.addEventListener('change', reparsePaste);
-  [el.group, el.label, el.ply, el.wrap, el.shortName, el.chapterTag].forEach(function(c){ c.addEventListener('change', render); });
+  [el.group, el.label, el.ply, el.wrap, el.shortName, el.chapterTag, el.mainline, el.blackTag, el.transp, el.labelPos].forEach(function(c){ c.addEventListener('change', render); });
   el.limit.addEventListener('input', render);
+  el.whiteLimit.addEventListener('input', render);
   el.ann.addEventListener('input', render);
+  document.querySelector('fieldset').addEventListener('change', saveOpts);
+  document.querySelector('fieldset').addEventListener('input', saveOpts);
   el.treePick.addEventListener('change', function(){ treeSel = el.treePick.value; render(); });
 
   el.copy.addEventListener('click', function(){
@@ -833,7 +1217,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
         return '<li class="'+(g.on?'':'off')+(isFirst?' first':'')+'">'
           + '<span class="idx">'+(c.games.indexOf(g)+1)+'</span>'
           + '<span class="name"><b>'+esc(lineName(g))+'</b><small>'
-          + (g.hasMoves ? plies(g.root)+' ply \u00b7 '+esc(firstMoves(g.root,6)) : 'no moves')
+          + (isRealLine(g) ? plies(g.root)+' ply \u00b7 '+esc(firstMoves(g.root,6)) : 'text only')
           + (g.result && g.result!=='*' ? ' \u00b7 '+esc(g.result) : '')
           + (g.tags.FEN && !M.isStandardStart(g.tags.FEN) ? ' \u00b7 FEN' : '')
           + '</small></span>'
@@ -861,10 +1245,16 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
   }
 
   function renderBook(root){
+    function cm(list){
+      if(!list || !list.length) return '';
+      var c=list.join(' ');
+      return '<span class="cm" title="'+esc(c)+'">'+esc(c.length>150?c.slice(0,150)+'…':c)+'</span> ';
+    }
     function moves(node, ply, depth){
       var html='', cur=node, p=ply, needNum=true;
       while(cur.children.length){
         var mv=cur.children[0], num=Math.floor(p/2)+1;
+        if(mv.pre && mv.pre.length){ html+=cm(mv.pre); needNum=true; }
         if(p%2===0) html+='<span class="num">'+num+'.</span> ';
         else if(needNum) html+='<span class="num">'+num+'...</span> ';
         html+='<span class="mv">'+esc(mv.san)+'</span> ';
@@ -875,6 +1265,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
         }
         for(var i=1;i<cur.children.length;i++){
           var alt=cur.children[i], sub='', n2=Math.floor(p/2)+1;
+          sub += cm(alt.pre);
           sub += '<span class="num">'+n2+(p%2===0?'.':'...')+'</span> ';
           sub += '<span class="mv">'+esc(alt.san)+'</span> ';
           if(alt.comments.length){
@@ -889,7 +1280,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       }
       return html;
     }
-    var h = root ? moves(root,0,0) : '';
+    var h = root ? cm(root.comments) + moves(root,0,0) : '';
     el.book.innerHTML = h || '<p class="empty">Nothing merged yet.</p>';
   }
 
@@ -914,7 +1305,7 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       if(c.mode==='merge' && c.active.length>1){
         var first=null, differs=false;
         c.active.forEach(function(g){
-          if(!g.hasMoves) return;
+          if(!isRealLine(g)) return;
           var s=g.root.children[0].san;
           if(first===null) first=s; else if(first!==s) differs=true;
         });
