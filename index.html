@@ -748,7 +748,11 @@ footer{color:var(--muted);font-size:12.5px;padding-top:28px;margin-top:26px;bord
       while (n && n.parent && n.line === ctx.line && !n.children.length &&
              !n.comments.length && !n.pre.length && !n.nags.length) {
         var p = n.parent;
-        p.children.splice(p.children.indexOf(n), 1);
+        // Already removed via another jump from the same route - stop.
+        // (splice(-1, 1) would otherwise delete the parent's last real branch.)
+        var at = p.children.indexOf(n);
+        if (at === -1) break;
+        p.children.splice(at, 1);
         if (n.pos) {
           var pk = posKey(n.pos);
           if (ctx.index[pk] && ctx.index[pk].node === n) delete ctx.index[pk];
